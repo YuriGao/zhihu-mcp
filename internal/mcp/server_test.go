@@ -46,6 +46,26 @@ func (fakeZhihu) PublishArticle(_ context.Context, req zhihu.PublishArticleReque
 	}, nil
 }
 
+func (fakeZhihu) UpdateAnswer(_ context.Context, req zhihu.UpdateAnswerRequest) (zhihu.UpdateAnswerResult, error) {
+	return zhihu.UpdateAnswerResult{
+		DryRun:     req.DryRun,
+		QuestionID: req.QuestionID,
+		AnswerID:   req.AnswerID,
+		Content:    req.Content,
+		URL:        "https://www.zhihu.com/question/1/answer/2",
+	}, nil
+}
+
+func (fakeZhihu) UpdateArticle(_ context.Context, req zhihu.UpdateArticleRequest) (zhihu.UpdateArticleResult, error) {
+	return zhihu.UpdateArticleResult{
+		DryRun:    req.DryRun,
+		ArticleID: req.ArticleID,
+		Title:     req.Title,
+		Content:   req.Content,
+		URL:       "https://zhuanlan.zhihu.com/p/1",
+	}, nil
+}
+
 func (fakeZhihu) OpenLogin(context.Context) (zhihu.LoginResult, error) {
 	return zhihu.LoginResult{LoginURL: "https://www.zhihu.com/signin", ProfileDir: ".zhihu-profile", Message: "opened"}, nil
 }
@@ -175,5 +195,59 @@ func TestServerHandlesPublishArticleTool(t *testing.T) {
 	}
 	if len(resp.Result.Content) != 1 || !strings.Contains(resp.Result.Content[0].Text, `"dry_run": true`) || !strings.Contains(resp.Result.Content[0].Text, "Slidr Free") {
 		t.Fatalf("unexpected publish article response: %s", out.String())
+	}
+}
+
+func TestServerHandlesUpdateAnswerTool(t *testing.T) {
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"zhihu_update_answer","arguments":{"question_id":1,"answer_id":2,"content":"hello","content_html":"<h2>hello</h2>","dry_run":true}}}`,
+		"",
+	}, "\n")
+	var out bytes.Buffer
+
+	server := NewServer(fakeZhihu{})
+	if err := server.Serve(context.Background(), strings.NewReader(input), &out); err != nil {
+		t.Fatalf("Serve returned error: %v", err)
+	}
+
+	var resp struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode update answer response: %v", err)
+	}
+	if len(resp.Result.Content) != 1 || !strings.Contains(resp.Result.Content[0].Text, `"answer_id": 2`) || !strings.Contains(resp.Result.Content[0].Text, `"dry_run": true`) {
+		t.Fatalf("unexpected update answer response: %s", out.String())
+	}
+}
+
+func TestServerHandlesUpdateArticleTool(t *testing.T) {
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"zhihu_update_article","arguments":{"article_id":1,"title":"Slidr Free","content":"hello","content_html":"<h2>hello</h2>","dry_run":true}}}`,
+		"",
+	}, "\n")
+	var out bytes.Buffer
+
+	server := NewServer(fakeZhihu{})
+	if err := server.Serve(context.Background(), strings.NewReader(input), &out); err != nil {
+		t.Fatalf("Serve returned error: %v", err)
+	}
+
+	var resp struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode update article response: %v", err)
+	}
+	if len(resp.Result.Content) != 1 || !strings.Contains(resp.Result.Content[0].Text, `"article_id": 1`) || !strings.Contains(resp.Result.Content[0].Text, `"dry_run": true`) {
+		t.Fatalf("unexpected update article response: %s", out.String())
 	}
 }

@@ -76,6 +76,13 @@ func (f *fakeSession) RequestJSON(_ context.Context, method string, path string,
 	case method == "PATCH" && path == "https://zhuanlan.zhihu.com/api/articles/789/draft":
 		return json.Unmarshal([]byte(`{"id":"789","url":"https://zhuanlan.zhihu.com/p/789"}`), target)
 	case method == "POST" && path == "https://www.zhihu.com/api/v4/content/publish":
+		action := ""
+		if m, ok := body.(map[string]any); ok {
+			action, _ = m["action"].(string)
+		}
+		if action == "update" {
+			return json.Unmarshal([]byte(`{"data":{"result":"{\"id\":\"456\",\"url\":\"https://zhuanlan.zhihu.com/p/456\"}"}}`), target)
+		}
 		return json.Unmarshal([]byte(`{"data":{"result":"{\"id\":\"789\",\"url\":\"https://zhuanlan.zhihu.com/p/789\"}"}}`), target)
 	default:
 		return json.Unmarshal([]byte(`{}`), target)
@@ -231,6 +238,76 @@ func TestPublishArticleCreatesUpdatesAndPublishesDraft(t *testing.T) {
 	}
 	if result.DryRun || result.ArticleID != 789 || result.URL != "https://zhuanlan.zhihu.com/p/789" {
 		t.Fatalf("unexpected publish result: %#v", result)
+	}
+}
+
+func TestUpdateAnswerUsesContentPublishUpdateWithHTML(t *testing.T) {
+	session := &fakeSession{}
+	client := NewClient(WithSession(session))
+	result, err := client.UpdateAnswer(t.Context(), UpdateAnswerRequest{
+		QuestionID:  123,
+		AnswerID:    456,
+		Content:     "fallback plain",
+		ContentHTML: `<h2>项目亮点</h2><ul><li>边缘滑动</li></ul>`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateAnswer returned error: %v", err)
+	}
+	if len(session.requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(session.requests))
+	}
+	req := session.requests[0]
+	if req.method != "POST" || req.path != "https://www.zhihu.com/api/v4/content/publish" {
+		t.Fatalf("request = %#v", req)
+	}
+	body := req.body.(map[string]any)
+	if body["action"] != "update" {
+		t.Fatalf("action = %#v", body["action"])
+	}
+	data := body["data"].(map[string]any)
+	if data["type"] != "answer" || data["question_id"] != int64(123) || data["answer_id"] != int64(456) {
+		t.Fatalf("data = %#v", data)
+	}
+	if data["content"] != `<h2>项目亮点</h2><ul><li>边缘滑动</li></ul>` {
+		t.Fatalf("content = %#v", data["content"])
+	}
+	if result.DryRun || result.AnswerID != 456 || result.URL != "https://www.zhihu.com/question/123/answer/456" {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestUpdateArticleUsesContentPublishUpdateWithHTML(t *testing.T) {
+	session := &fakeSession{}
+	client := NewClient(WithSession(session))
+	result, err := client.UpdateArticle(t.Context(), UpdateArticleRequest{
+		ArticleID:   456,
+		Title:       "Slidr Free",
+		Content:     "fallback plain",
+		ContentHTML: `<h2>安装</h2><pre><code>swift build</code></pre>`,
+	})
+	if err != nil {
+		t.Fatalf("UpdateArticle returned error: %v", err)
+	}
+	if len(session.requests) != 1 {
+		t.Fatalf("request count = %d, want 1", len(session.requests))
+	}
+	req := session.requests[0]
+	if req.method != "POST" || req.path != "https://www.zhihu.com/api/v4/content/publish" {
+		t.Fatalf("request = %#v", req)
+	}
+	body := req.body.(map[string]any)
+	if body["action"] != "update" {
+		t.Fatalf("action = %#v", body["action"])
+	}
+	data := body["data"].(map[string]any)
+	if data["type"] != "article" || data["article_id"] != int64(456) || data["title"] != "Slidr Free" {
+		t.Fatalf("data = %#v", data)
+	}
+	if data["content"] != `<h2>安装</h2><pre><code>swift build</code></pre>` {
+		t.Fatalf("content = %#v", data["content"])
+	}
+	if result.DryRun || result.ArticleID != 456 || result.URL != "https://zhuanlan.zhihu.com/p/456" {
+		t.Fatalf("unexpected result: %#v", result)
 	}
 }
 

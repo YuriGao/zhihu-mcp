@@ -17,6 +17,8 @@ type ZhihuClient interface {
 	Answers(context.Context, int64, int) ([]zhihu.Answer, error)
 	PublishAnswer(context.Context, zhihu.PublishAnswerRequest) (zhihu.PublishAnswerResult, error)
 	PublishArticle(context.Context, zhihu.PublishArticleRequest) (zhihu.PublishArticleResult, error)
+	UpdateAnswer(context.Context, zhihu.UpdateAnswerRequest) (zhihu.UpdateAnswerResult, error)
+	UpdateArticle(context.Context, zhihu.UpdateArticleRequest) (zhihu.UpdateArticleResult, error)
 	OpenLogin(context.Context) (zhihu.LoginResult, error)
 	LoginStatus(context.Context) (zhihu.LoginStatus, error)
 }
@@ -191,6 +193,46 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (any, err
 			Content: args.Content,
 			DryRun:  dryRun,
 		}))
+	case "zhihu_update_answer":
+		var args struct {
+			QuestionID  int64  `json:"question_id"`
+			AnswerID    int64  `json:"answer_id"`
+			Content     string `json:"content"`
+			ContentHTML string `json:"content_html"`
+			DryRun      *bool  `json:"dry_run"`
+		}
+		_ = json.Unmarshal(call.Arguments, &args)
+		dryRun := true
+		if args.DryRun != nil {
+			dryRun = *args.DryRun
+		}
+		return textResult(s.zhihu.UpdateAnswer(ctx, zhihu.UpdateAnswerRequest{
+			QuestionID:  args.QuestionID,
+			AnswerID:    args.AnswerID,
+			Content:     args.Content,
+			ContentHTML: args.ContentHTML,
+			DryRun:      dryRun,
+		}))
+	case "zhihu_update_article":
+		var args struct {
+			ArticleID   int64  `json:"article_id"`
+			Title       string `json:"title"`
+			Content     string `json:"content"`
+			ContentHTML string `json:"content_html"`
+			DryRun      *bool  `json:"dry_run"`
+		}
+		_ = json.Unmarshal(call.Arguments, &args)
+		dryRun := true
+		if args.DryRun != nil {
+			dryRun = *args.DryRun
+		}
+		return textResult(s.zhihu.UpdateArticle(ctx, zhihu.UpdateArticleRequest{
+			ArticleID:   args.ArticleID,
+			Title:       args.Title,
+			Content:     args.Content,
+			ContentHTML: args.ContentHTML,
+			DryRun:      dryRun,
+		}))
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", call.Name)
 	}
@@ -285,6 +327,28 @@ func tools() []map[string]any {
 				"content": stringSchema("Plain-text article content to publish."),
 				"dry_run": boolSchema("Preview only by default. Set false to publish."),
 			}, []string{"title", "content"}),
+		},
+		{
+			"name":        "zhihu_update_answer",
+			"description": "Update an existing Zhihu answer using the persistent Playwright profile. Defaults to dry_run=true and accepts optional content_html for rich text.",
+			"inputSchema": objectSchema(map[string]any{
+				"question_id":  numberSchema("Zhihu question ID."),
+				"answer_id":    numberSchema("Zhihu answer ID."),
+				"content":      stringSchema("Plain-text answer content used for preview or fallback."),
+				"content_html": stringSchema("Optional Zhihu-compatible HTML content for rich formatting."),
+				"dry_run":      boolSchema("Preview only by default. Set false to update."),
+			}, []string{"question_id", "answer_id", "content"}),
+		},
+		{
+			"name":        "zhihu_update_article",
+			"description": "Update an existing Zhihu column article using the persistent Playwright profile. Defaults to dry_run=true and accepts optional content_html for rich text.",
+			"inputSchema": objectSchema(map[string]any{
+				"article_id":   numberSchema("Zhihu article ID."),
+				"title":        stringSchema("Article title."),
+				"content":      stringSchema("Plain-text article content used for preview or fallback."),
+				"content_html": stringSchema("Optional Zhihu-compatible HTML content for rich formatting."),
+				"dry_run":      boolSchema("Preview only by default. Set false to update."),
+			}, []string{"article_id", "title", "content"}),
 		},
 	}
 }

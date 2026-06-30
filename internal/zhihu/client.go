@@ -145,6 +145,40 @@ type PublishArticleResult struct {
 	Message   string `json:"message"`
 }
 
+type UpdateAnswerRequest struct {
+	QuestionID  int64  `json:"question_id"`
+	AnswerID    int64  `json:"answer_id"`
+	Content     string `json:"content"`
+	ContentHTML string `json:"content_html,omitempty"`
+	DryRun      bool   `json:"dry_run"`
+}
+
+type UpdateAnswerResult struct {
+	DryRun     bool   `json:"dry_run"`
+	QuestionID int64  `json:"question_id"`
+	AnswerID   int64  `json:"answer_id"`
+	URL        string `json:"url,omitempty"`
+	Content    string `json:"content"`
+	Message    string `json:"message"`
+}
+
+type UpdateArticleRequest struct {
+	ArticleID   int64  `json:"article_id"`
+	Title       string `json:"title"`
+	Content     string `json:"content"`
+	ContentHTML string `json:"content_html,omitempty"`
+	DryRun      bool   `json:"dry_run"`
+}
+
+type UpdateArticleResult struct {
+	DryRun    bool   `json:"dry_run"`
+	ArticleID int64  `json:"article_id"`
+	URL       string `json:"url,omitempty"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	Message   string `json:"message"`
+}
+
 type LoginResult struct {
 	LoginURL   string `json:"login_url"`
 	ProfileDir string `json:"profile_dir"`
@@ -444,6 +478,119 @@ func (c *Client) PublishArticle(ctx context.Context, req PublishArticleRequest) 
 	return result, nil
 }
 
+func (c *Client) UpdateAnswer(ctx context.Context, req UpdateAnswerRequest) (UpdateAnswerResult, error) {
+	req.Content = strings.TrimSpace(req.Content)
+	req.ContentHTML = strings.TrimSpace(req.ContentHTML)
+	if req.QuestionID <= 0 {
+		return UpdateAnswerResult{}, errors.New("question_id must be positive")
+	}
+	if req.AnswerID <= 0 {
+		return UpdateAnswerResult{}, errors.New("answer_id must be positive")
+	}
+	if req.Content == "" && req.ContentHTML == "" {
+		return UpdateAnswerResult{}, errors.New("content or content_html is required")
+	}
+	result := UpdateAnswerResult{
+		DryRun:     req.DryRun,
+		QuestionID: req.QuestionID,
+		AnswerID:   req.AnswerID,
+		URL:        answerURL(req.QuestionID, req.AnswerID, ""),
+		Content:    displayContent(req.Content, req.ContentHTML),
+	}
+	if req.DryRun {
+		result.Message = "dry run only; pass dry_run=false after logging in with zhihu_open_login"
+		return result, nil
+	}
+
+	contentHTML := contentHTML(req.Content, req.ContentHTML)
+	publishBody := map[string]any{
+		"action": "update",
+		"data": map[string]any{
+			"type":                "answer",
+			"question_id":         req.QuestionID,
+			"answer_id":           req.AnswerID,
+			"content":             contentHTML,
+			"reshipment_settings": "allowed",
+			"comment_permission":  "all",
+			"reward_setting":      map[string]any{"can_reward": false},
+			"is_copyable":         true,
+			"is_report":           false,
+		},
+	}
+	var payload contentPublishResponse
+	if err := c.session.RequestJSON(ctx, "POST", "https://www.zhihu.com/api/v4/content/publish", publishBody, &payload); err != nil {
+		return UpdateAnswerResult{}, fmt.Errorf("update zhihu answer: %w", err)
+	}
+	result.Message = "answer updated"
+	return result, nil
+}
+
+func (c *Client) UpdateArticle(ctx context.Context, req UpdateArticleRequest) (UpdateArticleResult, error) {
+	req.Title = strings.TrimSpace(req.Title)
+	req.Content = strings.TrimSpace(req.Content)
+	req.ContentHTML = strings.TrimSpace(req.ContentHTML)
+	if req.ArticleID <= 0 {
+		return UpdateArticleResult{}, errors.New("article_id must be positive")
+	}
+	if req.Title == "" {
+		return UpdateArticleResult{}, errors.New("title is required")
+	}
+	if req.Content == "" && req.ContentHTML == "" {
+		return UpdateArticleResult{}, errors.New("content or content_html is required")
+	}
+	result := UpdateArticleResult{
+		DryRun:    req.DryRun,
+		ArticleID: req.ArticleID,
+		URL:       articleURL(req.ArticleID, ""),
+		Title:     req.Title,
+		Content:   displayContent(req.Content, req.ContentHTML),
+	}
+	if req.DryRun {
+		result.Message = "dry run only; pass dry_run=false after logging in with zhihu_open_login"
+		return result, nil
+	}
+
+	contentHTML := contentHTML(req.Content, req.ContentHTML)
+	publishBody := map[string]any{
+		"action": "update",
+		"data": map[string]any{
+			"type":                         "article",
+			"article_id":                   req.ArticleID,
+			"title":                        req.Title,
+			"content":                      contentHTML,
+			"column":                       nil,
+			"comment_permission":           "all",
+			"commercial_report_info":       map[string]any{"commercial_types": []any{}},
+			"commercial_zhitask_bind_info": nil,
+			"content_source":               map[string]any{"method": 0},
+		},
+	}
+	var payload contentPublishResponse
+	if err := c.session.RequestJSON(ctx, "POST", "https://www.zhihu.com/api/v4/content/publish", publishBody, &payload); err != nil {
+		return UpdateArticleResult{}, fmt.Errorf("update zhihu article: %w", err)
+	}
+	if strings.TrimSpace(payload.Data.Result) != "" {
+		var published struct {
+			ID  any    `json:"id"`
+			URL string `json:"url"`
+		}
+		if err := json.Unmarshal([]byte(payload.Data.Result), &published); err == nil {
+			if id := int64FromAny(published.ID); id > 0 {
+				result.ArticleID = id
+			}
+			result.URL = articleURL(result.ArticleID, published.URL)
+		}
+	}
+	result.Message = "article updated"
+	return result, nil
+}
+
+type contentPublishResponse struct {
+	Data struct {
+		Result string `json:"result"`
+	} `json:"data"`
+}
+
 var questionURLPattern = regexp.MustCompile(`/questions?/(\d+)`)
 
 func questionIDFromURL(rawURL string) int64 {
@@ -511,6 +658,20 @@ func htmlEscapeWithBreaks(content string) string {
 		"\n", "<br>",
 	)
 	return replacer.Replace(content)
+}
+
+func contentHTML(content, html string) string {
+	if strings.TrimSpace(html) != "" {
+		return strings.TrimSpace(html)
+	}
+	return plainTextToZhihuHTML(content)
+}
+
+func displayContent(content, html string) string {
+	if strings.TrimSpace(content) != "" {
+		return strings.TrimSpace(content)
+	}
+	return strings.TrimSpace(html)
 }
 
 func mapFromAny(value any) map[string]any {
