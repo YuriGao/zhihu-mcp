@@ -15,6 +15,7 @@ type ZhihuClient interface {
 	Search(context.Context, string, int) ([]zhihu.SearchItem, error)
 	Question(context.Context, int64) (zhihu.Question, error)
 	Answers(context.Context, int64, int) ([]zhihu.Answer, error)
+	PublishAnswer(context.Context, zhihu.PublishAnswerRequest) (zhihu.PublishAnswerResult, error)
 }
 
 type Server struct {
@@ -151,6 +152,22 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (any, err
 		}
 		_ = json.Unmarshal(call.Arguments, &args)
 		return textResult(s.zhihu.Answers(ctx, args.QuestionID, args.Limit))
+	case "zhihu_publish_answer":
+		var args struct {
+			QuestionID int64  `json:"question_id"`
+			Content    string `json:"content"`
+			DryRun     *bool  `json:"dry_run"`
+		}
+		_ = json.Unmarshal(call.Arguments, &args)
+		dryRun := true
+		if args.DryRun != nil {
+			dryRun = *args.DryRun
+		}
+		return textResult(s.zhihu.PublishAnswer(ctx, zhihu.PublishAnswerRequest{
+			QuestionID: args.QuestionID,
+			Content:    args.Content,
+			DryRun:     dryRun,
+		}))
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", call.Name)
 	}
@@ -218,6 +235,15 @@ func tools() []map[string]any {
 				"limit":       numberSchema("Maximum number of answers, default 5, max 20."),
 			}, []string{"question_id"}),
 		},
+		{
+			"name":        "zhihu_publish_answer",
+			"description": "Publish an answer to a Zhihu question using ZHIHU_COOKIE. Defaults to dry_run=true and only publishes when dry_run=false.",
+			"inputSchema": objectSchema(map[string]any{
+				"question_id": numberSchema("Zhihu question ID."),
+				"content":     stringSchema("Answer content to publish."),
+				"dry_run":     boolSchema("Preview only by default. Set false to publish."),
+			}, []string{"question_id", "content"}),
+		},
 	}
 }
 
@@ -236,4 +262,8 @@ func stringSchema(description string) map[string]any {
 
 func numberSchema(description string) map[string]any {
 	return map[string]any{"type": "integer", "description": description}
+}
+
+func boolSchema(description string) map[string]any {
+	return map[string]any{"type": "boolean", "description": description}
 }

@@ -1,6 +1,7 @@
 package zhihu
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -87,6 +88,21 @@ type Answer struct {
 	Excerpt string `json:"excerpt,omitempty"`
 	URL     string `json:"url"`
 	Votes   int    `json:"voteup_count,omitempty"`
+}
+
+type PublishAnswerRequest struct {
+	QuestionID int64  `json:"question_id"`
+	Content    string `json:"content"`
+	DryRun     bool   `json:"dry_run"`
+}
+
+type PublishAnswerResult struct {
+	DryRun     bool   `json:"dry_run"`
+	QuestionID int64  `json:"question_id"`
+	AnswerID   int64  `json:"answer_id,omitempty"`
+	URL        string `json:"url,omitempty"`
+	Content    string `json:"content"`
+	Message    string `json:"message"`
 }
 
 func (c *Client) HotList(ctx context.Context, limit int) ([]HotItem, error) {
@@ -249,6 +265,44 @@ func (c *Client) Answers(ctx context.Context, questionID int64, limit int) ([]An
 	return answers, nil
 }
 
+func (c *Client) PublishAnswer(ctx context.Context, req PublishAnswerRequest) (PublishAnswerResult, error) {
+	req.Content = strings.TrimSpace(req.Content)
+	if req.QuestionID <= 0 {
+		return PublishAnswerResult{}, errors.New("question_id must be positive")
+	}
+	if req.Content == "" {
+		return PublishAnswerResult{}, errors.New("content is required")
+	}
+	result := PublishAnswerResult{
+		DryRun:     req.DryRun,
+		QuestionID: req.QuestionID,
+		URL:        questionURL(req.QuestionID, ""),
+		Content:    req.Content,
+	}
+	if req.DryRun {
+		result.Message = "dry run only; pass dry_run=false to publish with ZHIHU_COOKIE"
+		return result, nil
+	}
+	if c.cookie == "" {
+		return PublishAnswerResult{}, errors.New("ZHIHU_COOKIE is required for publishing answers")
+	}
+
+	var payload struct {
+		ID  int64  `json:"id"`
+		URL string `json:"url"`
+	}
+	path := fmt.Sprintf("/questions/%d/answers", req.QuestionID)
+	if err := c.postJSON(ctx, path, map[string]any{
+		"content": req.Content,
+	}, &payload); err != nil {
+		return PublishAnswerResult{}, err
+	}
+	result.AnswerID = payload.ID
+	result.URL = answerURL(req.QuestionID, payload.ID, payload.URL)
+	result.Message = "answer published"
+	return result, nil
+}
+
 func (c *Client) getJSON(ctx context.Context, path string, params map[string]string, target any) error {
 	endpoint, err := url.Parse(c.baseURL + path)
 	if err != nil {
@@ -264,12 +318,7 @@ func (c *Client) getJSON(ctx context.Context, path string, params map[string]str
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", "Mozilla/5.0 zhihu-mcp/0.1 (+https://github.com/YuriGao/zhihu-mcp)")
-	req.Header.Set("Referer", "https://www.zhihu.com/")
-	if c.cookie != "" {
-		req.Header.Set("Cookie", c.cookie)
-	}
+	c.setCommonHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -284,6 +333,49 @@ func (c *Client) getJSON(ctx context.Context, path string, params map[string]str
 		return fmt.Errorf("decode zhihu response: %w", err)
 	}
 	return nil
+}
+
+func (c *Client) postJSON(ctx context.Context, path string, body any, target any) error {
+	endpoint, err := url.Parse(c.baseURL + path)
+	if err != nil {
+		return err
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	c.setCommonHeaders(req)
+	req.Header.Set("Content-Type", "application/json")
+	if xsrf := xsrfToken(c.cookie); xsrf != "" {
+		req.Header.Set("X-Xsrftoken", xsrf)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("zhihu request failed: %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return fmt.Errorf("decode zhihu response: %w", err)
+	}
+	return nil
+}
+
+func (c *Client) setCommonHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("User-Agent", "Mozilla/5.0 zhihu-mcp/0.1 (+https://github.com/YuriGao/zhihu-mcp)")
+	req.Header.Set("Referer", "https://www.zhihu.com/")
+	if c.cookie != "" {
+		req.Header.Set("Cookie", c.cookie)
+	}
 }
 
 var questionURLPattern = regexp.MustCompile(`/questions?/(\d+)`)
@@ -341,4 +433,21 @@ func int64FromAny(value any) int64 {
 	default:
 		return 0
 	}
+}
+
+func xsrfToken(cookie string) string {
+	for _, part := range strings.Split(cookie, ";") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		if name == "_xsrf" || strings.EqualFold(name, "XSRF-TOKEN") {
+			unescaped, err := url.QueryUnescape(value)
+			if err == nil {
+				return unescaped
+			}
+			return value
+		}
+	}
+	return ""
 }

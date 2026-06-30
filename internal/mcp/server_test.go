@@ -28,6 +28,15 @@ func (fakeZhihu) Answers(context.Context, int64, int) ([]zhihu.Answer, error) {
 	return []zhihu.Answer{{ID: 2, Author: "User", Excerpt: "Answer", URL: "https://www.zhihu.com/question/1/answer/2"}}, nil
 }
 
+func (fakeZhihu) PublishAnswer(_ context.Context, req zhihu.PublishAnswerRequest) (zhihu.PublishAnswerResult, error) {
+	return zhihu.PublishAnswerResult{
+		DryRun:     req.DryRun,
+		QuestionID: req.QuestionID,
+		Content:    req.Content,
+		URL:        "https://www.zhihu.com/question/1",
+	}, nil
+}
+
 func TestServerHandlesInitializeAndToolCall(t *testing.T) {
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
@@ -68,5 +77,32 @@ func TestServerHandlesInitializeAndToolCall(t *testing.T) {
 	}
 	if len(toolResp.Result.Content) != 1 || !strings.Contains(toolResp.Result.Content[0].Text, "zhihu.com/question/1") {
 		t.Fatalf("unexpected tool response: %s", lines[1])
+	}
+}
+
+func TestServerHandlesPublishAnswerTool(t *testing.T) {
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"zhihu_publish_answer","arguments":{"question_id":1,"content":"hello","dry_run":true}}}`,
+		"",
+	}, "\n")
+	var out bytes.Buffer
+
+	server := NewServer(fakeZhihu{})
+	if err := server.Serve(context.Background(), strings.NewReader(input), &out); err != nil {
+		t.Fatalf("Serve returned error: %v", err)
+	}
+
+	var resp struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode publish response: %v", err)
+	}
+	if len(resp.Result.Content) != 1 || !strings.Contains(resp.Result.Content[0].Text, `"dry_run": true`) || !strings.Contains(resp.Result.Content[0].Text, "hello") {
+		t.Fatalf("unexpected publish response: %s", out.String())
 	}
 }
