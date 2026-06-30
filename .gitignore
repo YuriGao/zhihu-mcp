@@ -1,0 +1,5 @@
+/zhihu-mcp.exe
+/zhihu-mcp
+*.test
+coverage.out
+.DS_Store
