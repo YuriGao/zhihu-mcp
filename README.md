@@ -1,16 +1,27 @@
 # zhihu-mcp
 
-A small Go MCP server for public Zhihu data over stdio.
+A Go MCP server for Zhihu using Playwright persistent browser state over stdio.
 
 ## Tools
 
+- `zhihu_open_login`: open a visible Playwright browser for manual Zhihu login.
+- `zhihu_login_status`: check whether the persistent profile appears logged in.
 - `zhihu_hot_list`: fetch Zhihu hot list items.
 - `zhihu_search`: search Zhihu by keyword.
 - `zhihu_question`: fetch question metadata.
 - `zhihu_answers`: fetch answers for a question.
-- `zhihu_publish_answer`: publish an answer to a question with your own Zhihu login cookie.
+- `zhihu_publish_answer`: publish an answer with the persistent Playwright profile.
 
-`zhihu_hot_list` works against a public Zhihu endpoint. Some deeper APIs, especially search and answers, may require a logged-in Zhihu session or may be rate-limited by Zhihu. If needed, provide a browser cookie through `ZHIHU_COOKIE`.
+The server stores login state in a dedicated Playwright profile directory. It does not read your normal Chrome profile and does not bypass captcha, rate limits, or other Zhihu safety checks.
+
+## Install
+
+Install the Go dependencies and Playwright Chromium browser:
+
+```powershell
+go mod download
+go run github.com/mxschmitt/playwright-go/cmd/playwright install chromium
+```
 
 ## Build
 
@@ -24,12 +35,23 @@ go build ./cmd/zhihu-mcp
 go run ./cmd/zhihu-mcp
 ```
 
-Optional cookie:
+Optional environment variables:
 
 ```powershell
-$env:ZHIHU_COOKIE = "_xsrf=...; z_c0=..."
+$env:ZHIHU_PROFILE_DIR = ".zhihu-profile"
+$env:ZHIHU_HEADLESS = "true"
 go run ./cmd/zhihu-mcp
 ```
+
+`ZHIHU_PROFILE_DIR` defaults to `./.zhihu-profile`. Keep this directory private; it contains browser login state.
+
+## Login Flow
+
+1. Start the MCP server.
+2. Call `zhihu_open_login`.
+3. Complete Zhihu login in the visible browser window.
+4. Call `zhihu_login_status` to verify the persistent profile is logged in.
+5. Use the read or publish tools. Future runs reuse the saved profile.
 
 ## Publishing Answers
 
@@ -43,9 +65,11 @@ go run ./cmd/zhihu-mcp
 }
 ```
 
-Publishing requires `ZHIHU_COOKIE` from your own logged-in Zhihu session. The server sends the cookie and `_xsrf` token normally; it does not bypass captcha, rate limits, or other Zhihu safety checks.
+Publishing requires that the Playwright profile is logged in. The server uses normal browser cookies and `_xsrf` from that profile.
 
-MCP clients should configure the command as:
+## MCP Configuration
+
+For an installed binary:
 
 ```json
 {
@@ -57,14 +81,18 @@ MCP clients should configure the command as:
 }
 ```
 
-During local development, use:
+During local development:
 
 ```json
 {
   "mcpServers": {
     "zhihu": {
       "command": "go",
-      "args": ["run", "./cmd/zhihu-mcp"]
+      "args": ["run", "./cmd/zhihu-mcp"],
+      "env": {
+        "ZHIHU_PROFILE_DIR": ".zhihu-profile",
+        "ZHIHU_HEADLESS": "true"
+      }
     }
   }
 }

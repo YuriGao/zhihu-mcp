@@ -16,6 +16,8 @@ type ZhihuClient interface {
 	Question(context.Context, int64) (zhihu.Question, error)
 	Answers(context.Context, int64, int) ([]zhihu.Answer, error)
 	PublishAnswer(context.Context, zhihu.PublishAnswerRequest) (zhihu.PublishAnswerResult, error)
+	OpenLogin(context.Context) (zhihu.LoginResult, error)
+	LoginStatus(context.Context) (zhihu.LoginStatus, error)
 }
 
 type Server struct {
@@ -126,6 +128,10 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (any, err
 		return nil, fmt.Errorf("invalid tools/call params: %w", err)
 	}
 	switch call.Name {
+	case "zhihu_open_login":
+		return textResult(s.zhihu.OpenLogin(ctx))
+	case "zhihu_login_status":
+		return textResult(s.zhihu.LoginStatus(ctx))
 	case "zhihu_hot_list":
 		var args struct {
 			Limit int `json:"limit"`
@@ -206,6 +212,16 @@ func writeResponse(w *bufio.Writer, resp response) error {
 func tools() []map[string]any {
 	return []map[string]any{
 		{
+			"name":        "zhihu_open_login",
+			"description": "Open a visible Playwright browser using the persistent Zhihu profile so the user can log in manually.",
+			"inputSchema": objectSchema(map[string]any{}, []string{}),
+		},
+		{
+			"name":        "zhihu_login_status",
+			"description": "Check whether the persistent Playwright Zhihu profile appears to be logged in.",
+			"inputSchema": objectSchema(map[string]any{}, []string{}),
+		},
+		{
 			"name":        "zhihu_hot_list",
 			"description": "Get current Zhihu hot list items.",
 			"inputSchema": objectSchema(map[string]any{
@@ -237,7 +253,7 @@ func tools() []map[string]any {
 		},
 		{
 			"name":        "zhihu_publish_answer",
-			"description": "Publish an answer to a Zhihu question using ZHIHU_COOKIE. Defaults to dry_run=true and only publishes when dry_run=false.",
+			"description": "Publish an answer to a Zhihu question using the persistent Playwright profile. Defaults to dry_run=true and only publishes when dry_run=false.",
 			"inputSchema": objectSchema(map[string]any{
 				"question_id": numberSchema("Zhihu question ID."),
 				"content":     stringSchema("Answer content to publish."),

@@ -1,23 +1,27 @@
 package zhihu
 
 import (
+	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-func TestClientHotListParsesItems(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/topstory/hot-list" {
-			t.Fatalf("unexpected path: %s", r.URL.Path)
-		}
-		if got := r.URL.Query().Get("limit"); got != "2" {
-			t.Fatalf("limit = %q, want 2", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
+type fakeSession struct {
+	fetchPath   string
+	fetchParams map[string]string
+	postPath    string
+	postBody    any
+	postCalled  bool
+	loginStatus LoginStatus
+}
+
+func (f *fakeSession) FetchJSON(_ context.Context, path string, params map[string]string, target any) error {
+	f.fetchPath = path
+	f.fetchParams = params
+	switch path {
+	case "/topstory/hot-list":
+		return json.Unmarshal([]byte(`{
 			"data": [
 				{
 					"target": {
@@ -44,14 +48,43 @@ func TestClientHotListParsesItems(t *testing.T) {
 					"detail_text": "10 万热度"
 				}
 			]
-		}`))
-	}))
-	defer server.Close()
+		}`), target)
+	default:
+		return json.Unmarshal([]byte(`{}`), target)
+	}
+}
 
-	client := NewClient(WithBaseURL(server.URL))
+func (f *fakeSession) PostJSON(_ context.Context, path string, body any, target any) error {
+	f.postCalled = true
+	f.postPath = path
+	f.postBody = body
+	return json.Unmarshal([]byte(`{"id":456,"url":"https://api.zhihu.com/answers/456"}`), target)
+}
+
+func (f *fakeSession) OpenLogin(context.Context) (LoginResult, error) {
+	return LoginResult{LoginURL: "https://www.zhihu.com/signin", ProfileDir: ".zhihu-profile", Message: "opened"}, nil
+}
+
+func (f *fakeSession) LoginStatus(context.Context) (LoginStatus, error) {
+	return f.loginStatus, nil
+}
+
+func (f *fakeSession) Close() error {
+	return nil
+}
+
+func TestClientHotListParsesItemsFromBrowserSession(t *testing.T) {
+	session := &fakeSession{}
+	client := NewClient(WithSession(session))
 	items, err := client.HotList(t.Context(), 2)
 	if err != nil {
 		t.Fatalf("HotList returned error: %v", err)
+	}
+	if session.fetchPath != "/topstory/hot-list" {
+		t.Fatalf("fetch path = %q", session.fetchPath)
+	}
+	if session.fetchParams["limit"] != "2" {
+		t.Fatalf("limit = %q, want 2", session.fetchParams["limit"])
 	}
 	if len(items) != 2 {
 		t.Fatalf("len(items) = %d, want 2", len(items))
@@ -62,39 +95,14 @@ func TestClientHotListParsesItems(t *testing.T) {
 	if items[0].URL != "https://www.zhihu.com/question/123" {
 		t.Fatalf("first URL = %q", items[0].URL)
 	}
-	if items[1].QuestionID != 456 {
-		t.Fatalf("second question id = %d, want 456", items[1].QuestionID)
-	}
-	if items[1].URL != "https://www.zhihu.com/question/456" {
-		t.Fatalf("second URL = %q", items[1].URL)
+	if items[1].QuestionID != 456 || items[1].URL != "https://www.zhihu.com/question/456" {
+		t.Fatalf("second item = %#v", items[1])
 	}
 }
 
-func TestClientSendsConfiguredCookie(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Cookie"); got != "SESSION=abc" {
-			t.Fatalf("Cookie = %q, want SESSION=abc", got)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":[]}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(WithBaseURL(server.URL), WithCookie("SESSION=abc"))
-	if _, err := client.HotList(t.Context(), 1); err != nil {
-		t.Fatalf("HotList returned error: %v", err)
-	}
-}
-
-func TestPublishAnswerDryRunDoesNotCallNetwork(t *testing.T) {
-	called := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-		t.Fatalf("dry run should not call network")
-	}))
-	defer server.Close()
-
-	client := NewClient(WithBaseURL(server.URL))
+func TestPublishAnswerDryRunDoesNotCallBrowserPost(t *testing.T) {
+	session := &fakeSession{}
+	client := NewClient(WithSession(session))
 	result, err := client.PublishAnswer(t.Context(), PublishAnswerRequest{
 		QuestionID: 123,
 		Content:    "  hello zhihu  ",
@@ -103,45 +111,17 @@ func TestPublishAnswerDryRunDoesNotCallNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublishAnswer returned error: %v", err)
 	}
-	if called {
-		t.Fatal("server was called during dry run")
+	if session.postCalled {
+		t.Fatal("PostJSON was called during dry run")
 	}
 	if !result.DryRun || result.QuestionID != 123 || result.Content != "hello zhihu" {
 		t.Fatalf("unexpected dry-run result: %#v", result)
 	}
 }
 
-func TestPublishAnswerPostsWithCookieAndXSRF(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			t.Fatalf("method = %s, want POST", r.Method)
-		}
-		if r.URL.Path != "/questions/123/answers" {
-			t.Fatalf("path = %s", r.URL.Path)
-		}
-		if got := r.Header.Get("Cookie"); got != "_xsrf=token123; z_c0=session" {
-			t.Fatalf("Cookie = %q", got)
-		}
-		if got := r.Header.Get("X-Xsrftoken"); got != "token123" {
-			t.Fatalf("X-Xsrftoken = %q", got)
-		}
-		if got := r.Header.Get("Content-Type"); !strings.Contains(got, "application/json") {
-			t.Fatalf("Content-Type = %q", got)
-		}
-
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			t.Fatalf("decode request body: %v", err)
-		}
-		if body["content"] != "hello zhihu" {
-			t.Fatalf("content = %#v", body["content"])
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":456,"url":"https://api.zhihu.com/answers/456"}`))
-	}))
-	defer server.Close()
-
-	client := NewClient(WithBaseURL(server.URL), WithCookie("_xsrf=token123; z_c0=session"))
+func TestPublishAnswerPostsThroughBrowserSession(t *testing.T) {
+	session := &fakeSession{}
+	client := NewClient(WithSession(session))
 	result, err := client.PublishAnswer(t.Context(), PublishAnswerRequest{
 		QuestionID: 123,
 		Content:    "hello zhihu",
@@ -149,18 +129,33 @@ func TestPublishAnswerPostsWithCookieAndXSRF(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PublishAnswer returned error: %v", err)
 	}
+	if !session.postCalled {
+		t.Fatal("PostJSON was not called")
+	}
+	if session.postPath != "/questions/123/answers" {
+		t.Fatalf("post path = %q", session.postPath)
+	}
+	body := session.postBody.(map[string]any)
+	if body["content"] != "hello zhihu" {
+		t.Fatalf("content = %#v", body["content"])
+	}
 	if result.DryRun || result.AnswerID != 456 || result.URL != "https://www.zhihu.com/question/123/answer/456" {
 		t.Fatalf("unexpected publish result: %#v", result)
 	}
 }
 
-func TestPublishAnswerRequiresCookieForRealPublish(t *testing.T) {
-	client := NewClient()
-	_, err := client.PublishAnswer(t.Context(), PublishAnswerRequest{
-		QuestionID: 123,
-		Content:    "hello zhihu",
-	})
-	if err == nil || !strings.Contains(err.Error(), "ZHIHU_COOKIE") {
-		t.Fatalf("error = %v, want ZHIHU_COOKIE guidance", err)
+func TestLoginStatusUsesPersistentProfile(t *testing.T) {
+	session := &fakeSession{loginStatus: LoginStatus{
+		LoggedIn:   true,
+		ProfileDir: ".zhihu-profile",
+		Message:    "logged in",
+	}}
+	client := NewClient(WithSession(session))
+	status, err := client.LoginStatus(t.Context())
+	if err != nil {
+		t.Fatalf("LoginStatus returned error: %v", err)
+	}
+	if !status.LoggedIn || !strings.Contains(status.ProfileDir, ".zhihu-profile") {
+		t.Fatalf("unexpected status: %#v", status)
 	}
 }

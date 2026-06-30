@@ -37,6 +37,14 @@ func (fakeZhihu) PublishAnswer(_ context.Context, req zhihu.PublishAnswerRequest
 	}, nil
 }
 
+func (fakeZhihu) OpenLogin(context.Context) (zhihu.LoginResult, error) {
+	return zhihu.LoginResult{LoginURL: "https://www.zhihu.com/signin", ProfileDir: ".zhihu-profile", Message: "opened"}, nil
+}
+
+func (fakeZhihu) LoginStatus(context.Context) (zhihu.LoginStatus, error) {
+	return zhihu.LoginStatus{LoggedIn: true, ProfileDir: ".zhihu-profile", Message: "logged in"}, nil
+}
+
 func TestServerHandlesInitializeAndToolCall(t *testing.T) {
 	input := strings.Join([]string{
 		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`,
@@ -77,6 +85,33 @@ func TestServerHandlesInitializeAndToolCall(t *testing.T) {
 	}
 	if len(toolResp.Result.Content) != 1 || !strings.Contains(toolResp.Result.Content[0].Text, "zhihu.com/question/1") {
 		t.Fatalf("unexpected tool response: %s", lines[1])
+	}
+}
+
+func TestServerHandlesLoginStatusTool(t *testing.T) {
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"zhihu_login_status","arguments":{}}}`,
+		"",
+	}, "\n")
+	var out bytes.Buffer
+
+	server := NewServer(fakeZhihu{})
+	if err := server.Serve(context.Background(), strings.NewReader(input), &out); err != nil {
+		t.Fatalf("Serve returned error: %v", err)
+	}
+
+	var resp struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode login status response: %v", err)
+	}
+	if len(resp.Result.Content) != 1 || !strings.Contains(resp.Result.Content[0].Text, `"logged_in": true`) {
+		t.Fatalf("unexpected login status response: %s", out.String())
 	}
 }
 

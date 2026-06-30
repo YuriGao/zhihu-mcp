@@ -1,61 +1,84 @@
 package zhihu
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"time"
 )
 
 const defaultBaseURL = "https://api.zhihu.com"
 
-type Client struct {
-	baseURL    string
-	httpClient *http.Client
-	cookie     string
+type browserSession interface {
+	FetchJSON(context.Context, string, map[string]string, any) error
+	PostJSON(context.Context, string, any, any) error
+	OpenLogin(context.Context) (LoginResult, error)
+	LoginStatus(context.Context) (LoginStatus, error)
+	Close() error
 }
 
-type Option func(*Client)
+type Client struct {
+	session browserSession
+}
+
+type Option func(*clientConfig)
+
+type clientConfig struct {
+	baseURL    string
+	profileDir string
+	headless   bool
+	session    browserSession
+}
 
 func WithBaseURL(baseURL string) Option {
-	return func(c *Client) {
+	return func(c *clientConfig) {
 		c.baseURL = strings.TrimRight(baseURL, "/")
 	}
 }
 
-func WithHTTPClient(httpClient *http.Client) Option {
-	return func(c *Client) {
-		if httpClient != nil {
-			c.httpClient = httpClient
-		}
+func WithProfileDir(profileDir string) Option {
+	return func(c *clientConfig) {
+		c.profileDir = profileDir
 	}
 }
 
-func WithCookie(cookie string) Option {
-	return func(c *Client) {
-		c.cookie = strings.TrimSpace(cookie)
+func WithHeadless(headless bool) Option {
+	return func(c *clientConfig) {
+		c.headless = headless
+	}
+}
+
+func WithSession(session browserSession) Option {
+	return func(c *clientConfig) {
+		c.session = session
 	}
 }
 
 func NewClient(opts ...Option) *Client {
-	c := &Client{
-		baseURL: defaultBaseURL,
-		httpClient: &http.Client{
-			Timeout: 15 * time.Second,
-		},
+	cfg := clientConfig{
+		baseURL:    defaultBaseURL,
+		profileDir: defaultProfileDir(),
+		headless:   envBool("ZHIHU_HEADLESS", true),
+	}
+	if profileDir := strings.TrimSpace(os.Getenv("ZHIHU_PROFILE_DIR")); profileDir != "" {
+		cfg.profileDir = profileDir
 	}
 	for _, opt := range opts {
-		opt(c)
+		opt(&cfg)
 	}
-	return c
+	if cfg.session == nil {
+		cfg.session = NewPlaywrightSession(PlaywrightSessionConfig{
+			BaseURL:    cfg.baseURL,
+			ProfileDir: cfg.profileDir,
+			Headless:   cfg.headless,
+		})
+	}
+	return &Client{session: cfg.session}
 }
 
 type HotItem struct {
@@ -105,6 +128,31 @@ type PublishAnswerResult struct {
 	Message    string `json:"message"`
 }
 
+type LoginResult struct {
+	LoginURL   string `json:"login_url"`
+	ProfileDir string `json:"profile_dir"`
+	Message    string `json:"message"`
+}
+
+type LoginStatus struct {
+	LoggedIn   bool   `json:"logged_in"`
+	ProfileDir string `json:"profile_dir"`
+	URL        string `json:"url,omitempty"`
+	Message    string `json:"message"`
+}
+
+func (c *Client) Close() error {
+	return c.session.Close()
+}
+
+func (c *Client) OpenLogin(ctx context.Context) (LoginResult, error) {
+	return c.session.OpenLogin(ctx)
+}
+
+func (c *Client) LoginStatus(ctx context.Context) (LoginStatus, error) {
+	return c.session.LoginStatus(ctx)
+}
+
 func (c *Client) HotList(ctx context.Context, limit int) ([]HotItem, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 10
@@ -122,7 +170,7 @@ func (c *Client) HotList(ctx context.Context, limit int) ([]HotItem, error) {
 			DetailText string `json:"detail_text"`
 		} `json:"data"`
 	}
-	if err := c.getJSON(ctx, "/topstory/hot-list", map[string]string{
+	if err := c.session.FetchJSON(ctx, "/topstory/hot-list", map[string]string{
 		"limit": strconv.Itoa(limit),
 	}, &payload); err != nil {
 		return nil, err
@@ -158,7 +206,7 @@ func (c *Client) Search(ctx context.Context, query string, limit int) ([]SearchI
 	var payload struct {
 		Data []map[string]any `json:"data"`
 	}
-	if err := c.getJSON(ctx, "/search_v3", map[string]string{
+	if err := c.session.FetchJSON(ctx, "/search_v3", map[string]string{
 		"t":          "general",
 		"q":          query,
 		"correction": "1",
@@ -206,7 +254,7 @@ func (c *Client) Question(ctx context.Context, questionID int64) (Question, erro
 		URL           string `json:"url"`
 	}
 	path := fmt.Sprintf("/questions/%d", questionID)
-	if err := c.getJSON(ctx, path, map[string]string{
+	if err := c.session.FetchJSON(ctx, path, map[string]string{
 		"include": "detail,answer_count,follower_count",
 	}, &payload); err != nil {
 		return Question{}, err
@@ -244,7 +292,7 @@ func (c *Client) Answers(ctx context.Context, questionID int64, limit int) ([]An
 		} `json:"data"`
 	}
 	path := fmt.Sprintf("/questions/%d/answers", questionID)
-	if err := c.getJSON(ctx, path, map[string]string{
+	if err := c.session.FetchJSON(ctx, path, map[string]string{
 		"limit":   strconv.Itoa(limit),
 		"offset":  "0",
 		"sort_by": "default",
@@ -280,11 +328,8 @@ func (c *Client) PublishAnswer(ctx context.Context, req PublishAnswerRequest) (P
 		Content:    req.Content,
 	}
 	if req.DryRun {
-		result.Message = "dry run only; pass dry_run=false to publish with ZHIHU_COOKIE"
+		result.Message = "dry run only; pass dry_run=false after logging in with zhihu_open_login"
 		return result, nil
-	}
-	if c.cookie == "" {
-		return PublishAnswerResult{}, errors.New("ZHIHU_COOKIE is required for publishing answers")
 	}
 
 	var payload struct {
@@ -292,7 +337,7 @@ func (c *Client) PublishAnswer(ctx context.Context, req PublishAnswerRequest) (P
 		URL string `json:"url"`
 	}
 	path := fmt.Sprintf("/questions/%d/answers", req.QuestionID)
-	if err := c.postJSON(ctx, path, map[string]any{
+	if err := c.session.PostJSON(ctx, path, map[string]any{
 		"content": req.Content,
 	}, &payload); err != nil {
 		return PublishAnswerResult{}, err
@@ -301,81 +346,6 @@ func (c *Client) PublishAnswer(ctx context.Context, req PublishAnswerRequest) (P
 	result.URL = answerURL(req.QuestionID, payload.ID, payload.URL)
 	result.Message = "answer published"
 	return result, nil
-}
-
-func (c *Client) getJSON(ctx context.Context, path string, params map[string]string, target any) error {
-	endpoint, err := url.Parse(c.baseURL + path)
-	if err != nil {
-		return err
-	}
-	q := endpoint.Query()
-	for key, value := range params {
-		q.Set(key, value)
-	}
-	endpoint.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return err
-	}
-	c.setCommonHeaders(req)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("zhihu request failed: %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
-		return fmt.Errorf("decode zhihu response: %w", err)
-	}
-	return nil
-}
-
-func (c *Client) postJSON(ctx context.Context, path string, body any, target any) error {
-	endpoint, err := url.Parse(c.baseURL + path)
-	if err != nil {
-		return err
-	}
-	data, err := json.Marshal(body)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	c.setCommonHeaders(req)
-	req.Header.Set("Content-Type", "application/json")
-	if xsrf := xsrfToken(c.cookie); xsrf != "" {
-		req.Header.Set("X-Xsrftoken", xsrf)
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("zhihu request failed: %s: %s", resp.Status, strings.TrimSpace(string(respBody)))
-	}
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
-		return fmt.Errorf("decode zhihu response: %w", err)
-	}
-	return nil
-}
-
-func (c *Client) setCommonHeaders(req *http.Request) {
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("User-Agent", "Mozilla/5.0 zhihu-mcp/0.1 (+https://github.com/YuriGao/zhihu-mcp)")
-	req.Header.Set("Referer", "https://www.zhihu.com/")
-	if c.cookie != "" {
-		req.Header.Set("Cookie", c.cookie)
-	}
 }
 
 var questionURLPattern = regexp.MustCompile(`/questions?/(\d+)`)
@@ -435,19 +405,31 @@ func int64FromAny(value any) int64 {
 	}
 }
 
-func xsrfToken(cookie string) string {
-	for _, part := range strings.Split(cookie, ";") {
-		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
-		if !ok {
-			continue
-		}
-		if name == "_xsrf" || strings.EqualFold(name, "XSRF-TOKEN") {
-			unescaped, err := url.QueryUnescape(value)
-			if err == nil {
-				return unescaped
-			}
-			return value
-		}
+func defaultProfileDir() string {
+	return filepath.Join(".", ".zhihu-profile")
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
 	}
-	return ""
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func encodeURL(baseURL, path string, params map[string]string) (string, error) {
+	endpoint, err := url.Parse(strings.TrimRight(baseURL, "/") + path)
+	if err != nil {
+		return "", err
+	}
+	q := endpoint.Query()
+	for key, value := range params {
+		q.Set(key, value)
+	}
+	endpoint.RawQuery = q.Encode()
+	return endpoint.String(), nil
 }

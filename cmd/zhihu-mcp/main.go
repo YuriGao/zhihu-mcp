@@ -10,7 +10,10 @@ import (
 )
 
 func main() {
-	server := mcp.NewServer(zhihu.NewClient(zhihu.WithCookie(os.Getenv("ZHIHU_COOKIE"))))
+	client := zhihu.NewClient()
+	defer client.Close()
+
+	server := mcp.NewServer(client)
 	if err := server.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "zhihu-mcp: %v\n", err)
 		os.Exit(1)
