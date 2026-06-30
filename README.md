@@ -11,6 +11,7 @@ A Go MCP server for Zhihu using Playwright persistent browser state over stdio.
 - `zhihu_question`: fetch question metadata.
 - `zhihu_answers`: fetch answers for a question.
 - `zhihu_publish_answer`: publish an answer with the persistent Playwright profile.
+- `zhihu_publish_article`: publish a column article with the persistent Playwright profile.
 
 The server stores login state in a dedicated Playwright profile directory. It does not read your normal Chrome profile and does not bypass captcha, rate limits, or other Zhihu safety checks.
 
@@ -66,6 +67,20 @@ go run ./cmd/zhihu-mcp
 ```
 
 Publishing requires that the Playwright profile is logged in. The server uses normal browser cookies and `_xsrf` from that profile.
+
+## Publishing Articles
+
+`zhihu_publish_article` also defaults to `dry_run: true`. To publish a column article, call it with:
+
+```json
+{
+  "title": "Your article title",
+  "content": "Plain-text article content",
+  "dry_run": false
+}
+```
+
+The server converts plain text paragraphs into Zhihu-compatible HTML and publishes through the same persistent Playwright profile.
 
 ## MCP Configuration
 

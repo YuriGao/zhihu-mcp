@@ -37,6 +37,15 @@ func (fakeZhihu) PublishAnswer(_ context.Context, req zhihu.PublishAnswerRequest
 	}, nil
 }
 
+func (fakeZhihu) PublishArticle(_ context.Context, req zhihu.PublishArticleRequest) (zhihu.PublishArticleResult, error) {
+	return zhihu.PublishArticleResult{
+		DryRun:  req.DryRun,
+		Title:   req.Title,
+		Content: req.Content,
+		URL:     "https://zhuanlan.zhihu.com/p/1",
+	}, nil
+}
+
 func (fakeZhihu) OpenLogin(context.Context) (zhihu.LoginResult, error) {
 	return zhihu.LoginResult{LoginURL: "https://www.zhihu.com/signin", ProfileDir: ".zhihu-profile", Message: "opened"}, nil
 }
@@ -139,5 +148,32 @@ func TestServerHandlesPublishAnswerTool(t *testing.T) {
 	}
 	if len(resp.Result.Content) != 1 || !strings.Contains(resp.Result.Content[0].Text, `"dry_run": true`) || !strings.Contains(resp.Result.Content[0].Text, "hello") {
 		t.Fatalf("unexpected publish response: %s", out.String())
+	}
+}
+
+func TestServerHandlesPublishArticleTool(t *testing.T) {
+	input := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"zhihu_publish_article","arguments":{"title":"Slidr Free","content":"hello","dry_run":true}}}`,
+		"",
+	}, "\n")
+	var out bytes.Buffer
+
+	server := NewServer(fakeZhihu{})
+	if err := server.Serve(context.Background(), strings.NewReader(input), &out); err != nil {
+		t.Fatalf("Serve returned error: %v", err)
+	}
+
+	var resp struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &resp); err != nil {
+		t.Fatalf("decode publish article response: %v", err)
+	}
+	if len(resp.Result.Content) != 1 || !strings.Contains(resp.Result.Content[0].Text, `"dry_run": true`) || !strings.Contains(resp.Result.Content[0].Text, "Slidr Free") {
+		t.Fatalf("unexpected publish article response: %s", out.String())
 	}
 }

@@ -2,6 +2,7 @@ package zhihu
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -17,6 +18,7 @@ const defaultBaseURL = "https://api.zhihu.com"
 type browserSession interface {
 	FetchJSON(context.Context, string, map[string]string, any) error
 	PostJSON(context.Context, string, any, any) error
+	RequestJSON(context.Context, string, string, any, any) error
 	OpenLogin(context.Context) (LoginResult, error)
 	LoginStatus(context.Context) (LoginStatus, error)
 	Close() error
@@ -126,6 +128,21 @@ type PublishAnswerResult struct {
 	URL        string `json:"url,omitempty"`
 	Content    string `json:"content"`
 	Message    string `json:"message"`
+}
+
+type PublishArticleRequest struct {
+	Title   string `json:"title"`
+	Content string `json:"content"`
+	DryRun  bool   `json:"dry_run"`
+}
+
+type PublishArticleResult struct {
+	DryRun    bool   `json:"dry_run"`
+	ArticleID int64  `json:"article_id,omitempty"`
+	URL       string `json:"url,omitempty"`
+	Title     string `json:"title"`
+	Content   string `json:"content"`
+	Message   string `json:"message"`
 }
 
 type LoginResult struct {
@@ -333,18 +350,97 @@ func (c *Client) PublishAnswer(ctx context.Context, req PublishAnswerRequest) (P
 	}
 
 	var payload struct {
-		ID  int64  `json:"id"`
+		ID  any    `json:"id"`
 		URL string `json:"url"`
 	}
-	path := fmt.Sprintf("/questions/%d/answers", req.QuestionID)
+	path := fmt.Sprintf("https://www.zhihu.com/api/v4/questions/%d/answers", req.QuestionID)
 	if err := c.session.PostJSON(ctx, path, map[string]any{
-		"content": req.Content,
+		"content":             plainTextToZhihuHTML(req.Content),
+		"reshipment_settings": "allowed",
+		"comment_permission":  "all",
+		"reward_setting":      map[string]any{"can_reward": false},
 	}, &payload); err != nil {
 		return PublishAnswerResult{}, err
 	}
-	result.AnswerID = payload.ID
-	result.URL = answerURL(req.QuestionID, payload.ID, payload.URL)
+	result.AnswerID = int64FromAny(payload.ID)
+	result.URL = answerURL(req.QuestionID, result.AnswerID, payload.URL)
 	result.Message = "answer published"
+	return result, nil
+}
+
+func (c *Client) PublishArticle(ctx context.Context, req PublishArticleRequest) (PublishArticleResult, error) {
+	req.Title = strings.TrimSpace(req.Title)
+	req.Content = strings.TrimSpace(req.Content)
+	if req.Title == "" {
+		return PublishArticleResult{}, errors.New("title is required")
+	}
+	if req.Content == "" {
+		return PublishArticleResult{}, errors.New("content is required")
+	}
+	result := PublishArticleResult{
+		DryRun:  req.DryRun,
+		Title:   req.Title,
+		Content: req.Content,
+	}
+	if req.DryRun {
+		result.Message = "dry run only; pass dry_run=false after logging in with zhihu_open_login"
+		return result, nil
+	}
+
+	var draft struct {
+		ID  any    `json:"id"`
+		URL string `json:"url"`
+	}
+	if err := c.session.RequestJSON(ctx, "POST", "https://zhuanlan.zhihu.com/api/articles/drafts", map[string]any{}, &draft); err != nil {
+		return PublishArticleResult{}, fmt.Errorf("create zhihu article draft: %w", err)
+	}
+	draftID := int64FromAny(draft.ID)
+	if draftID <= 0 {
+		return PublishArticleResult{}, errors.New("create zhihu article draft: response did not include draft id")
+	}
+
+	contentHTML := plainTextToZhihuHTML(req.Content)
+	draftURL := fmt.Sprintf("https://zhuanlan.zhihu.com/api/articles/%d/draft", draftID)
+	if err := c.session.RequestJSON(ctx, "PATCH", draftURL, map[string]any{
+		"title":             req.Title,
+		"content":           contentHTML,
+		"table_of_contents": false,
+	}, &draft); err != nil {
+		return PublishArticleResult{}, fmt.Errorf("update zhihu article draft: %w", err)
+	}
+
+	var publishPayload struct {
+		Data struct {
+			Result string `json:"result"`
+		} `json:"data"`
+	}
+	publishBody := map[string]any{
+		"action": "publish",
+		"data": map[string]any{
+			"type":                         "article",
+			"article_id":                   draftID,
+			"title":                        req.Title,
+			"content":                      contentHTML,
+			"column":                       nil,
+			"comment_permission":           "all",
+			"commercial_report_info":       map[string]any{"commercial_types": []any{}},
+			"commercial_zhitask_bind_info": nil,
+			"content_source":               map[string]any{"method": 0},
+		},
+	}
+	if err := c.session.RequestJSON(ctx, "POST", "https://www.zhihu.com/api/v4/content/publish", publishBody, &publishPayload); err != nil {
+		return PublishArticleResult{}, fmt.Errorf("publish zhihu article: %w", err)
+	}
+	if strings.TrimSpace(publishPayload.Data.Result) != "" {
+		_ = json.Unmarshal([]byte(publishPayload.Data.Result), &draft)
+	}
+
+	result.ArticleID = int64FromAny(draft.ID)
+	if result.ArticleID <= 0 {
+		result.ArticleID = draftID
+	}
+	result.URL = articleURL(result.ArticleID, draft.URL)
+	result.Message = "article published"
 	return result, nil
 }
 
@@ -371,6 +467,50 @@ func answerURL(questionID, answerID int64, fallback string) string {
 		return fmt.Sprintf("https://www.zhihu.com/question/%d/answer/%d", questionID, answerID)
 	}
 	return fallback
+}
+
+func articleURL(articleID int64, fallback string) string {
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	if articleID > 0 {
+		return fmt.Sprintf("https://zhuanlan.zhihu.com/p/%d", articleID)
+	}
+	return ""
+}
+
+func plainTextToZhihuHTML(content string) string {
+	lines := strings.Split(content, "\n")
+	var paragraphs []string
+	var current []string
+	flush := func() {
+		text := strings.TrimSpace(strings.Join(current, "\n"))
+		if text != "" {
+			paragraphs = append(paragraphs, "<p>"+htmlEscapeWithBreaks(text)+"</p>")
+		}
+		current = nil
+	}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			flush()
+			continue
+		}
+		current = append(current, line)
+	}
+	flush()
+	return strings.Join(paragraphs, "")
+}
+
+func htmlEscapeWithBreaks(content string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&#39;",
+		"\n", "<br>",
+	)
+	return replacer.Replace(content)
 }
 
 func mapFromAny(value any) map[string]any {

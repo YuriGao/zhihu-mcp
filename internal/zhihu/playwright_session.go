@@ -68,46 +68,41 @@ func (s *PlaywrightSession) FetchJSON(ctx context.Context, path string, params m
 }
 
 func (s *PlaywrightSession) PostJSON(ctx context.Context, path string, body any, target any) error {
+	return s.RequestJSON(ctx, "POST", path, body, target)
+}
+
+func (s *PlaywrightSession) RequestJSON(ctx context.Context, method string, path string, body any, target any) error {
 	_ = ctx
 	page, err := s.ensurePage(s.headless)
 	if err != nil {
 		return err
 	}
+	navigationURL := "https://www.zhihu.com"
 	questionID := questionIDFromURL(path)
 	if questionID > 0 {
-		if _, err := page.Goto(questionURL(questionID, "")); err != nil {
-			return err
-		}
-	} else if _, err := page.Goto("https://www.zhihu.com"); err != nil {
+		navigationURL = questionURL(questionID, "")
+	} else if strings.HasPrefix(path, "https://zhuanlan.zhihu.com") {
+		navigationURL = "https://zhuanlan.zhihu.com/write"
+	}
+	if _, err := page.Goto(navigationURL, playwright.PageGotoOptions{
+		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
+	}); err != nil {
 		return err
 	}
-	apiURL, err := encodeURL(s.baseURL, path, nil)
+	_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+		State:   playwright.LoadStateDomcontentloaded,
+		Timeout: playwright.Float(5000),
+	})
+	apiURL, err := s.requestURL(path)
 	if err != nil {
 		return err
 	}
 	arg := map[string]any{
-		"url":  apiURL,
-		"body": body,
+		"method": strings.ToUpper(method),
+		"url":    apiURL,
+		"body":   body,
 	}
-	value, err := page.Evaluate(`async ({ url, body }) => {
-		const xsrf = document.cookie.split('; ')
-			.find((part) => part.startsWith('_xsrf='))
-			?.split('=')
-			.slice(1)
-			.join('=') || '';
-		const response = await fetch(url, {
-			method: 'POST',
-			credentials: 'include',
-			headers: {
-				'accept': 'application/json, text/plain, */*',
-				'content-type': 'application/json',
-				'x-xsrftoken': decodeURIComponent(xsrf)
-			},
-			body: JSON.stringify(body)
-		});
-		const text = await response.text();
-		return { ok: response.ok, status: response.status, statusText: response.statusText, text };
-	}`, arg)
+	value, err := evaluateBrowserJSONRequest(page, arg)
 	if err != nil {
 		return err
 	}
@@ -121,10 +116,64 @@ func (s *PlaywrightSession) PostJSON(ctx context.Context, path string, body any,
 		statusText, _ := result["statusText"].(string)
 		return fmt.Errorf("zhihu request failed: %.0f %s: %s", status, statusText, strings.TrimSpace(text))
 	}
+	if target == nil || strings.TrimSpace(text) == "" {
+		return nil
+	}
 	if err := json.Unmarshal([]byte(text), target); err != nil {
 		return fmt.Errorf("decode zhihu response from browser: %w", err)
 	}
 	return nil
+}
+
+func (s *PlaywrightSession) requestURL(path string) (string, error) {
+	if strings.HasPrefix(path, "https://") || strings.HasPrefix(path, "http://") {
+		return path, nil
+	}
+	return encodeURL(s.baseURL, path, nil)
+}
+
+func evaluateBrowserJSONRequest(page playwright.Page, arg map[string]any) (any, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		value, err := page.Evaluate(`async ({ method, url, body }) => {
+			const xsrf = document.cookie.split('; ')
+				.find((part) => part.startsWith('_xsrf='))
+				?.split('=')
+				.slice(1)
+				.join('=') || '';
+			const response = await fetch(url, {
+				method,
+				credentials: 'include',
+				headers: {
+					'accept': 'application/json, text/plain, */*',
+					'content-type': 'application/json',
+					'x-xsrftoken': decodeURIComponent(xsrf)
+				},
+				body: JSON.stringify(body || {})
+			});
+			const text = await response.text();
+			return { ok: response.ok, status: response.status, statusText: response.statusText, text };
+		}`, arg)
+		if err == nil {
+			return value, nil
+		}
+		lastErr = err
+		if !isNavigationContextError(err) {
+			return nil, err
+		}
+		_ = page.WaitForLoadState(playwright.PageWaitForLoadStateOptions{
+			State:   playwright.LoadStateDomcontentloaded,
+			Timeout: playwright.Float(3000),
+		})
+	}
+	return nil, lastErr
+}
+
+func isNavigationContextError(err error) bool {
+	message := err.Error()
+	return strings.Contains(message, "Execution context was destroyed") ||
+		strings.Contains(message, "Cannot find context") ||
+		strings.Contains(message, "Most likely because of a navigation")
 }
 
 func (s *PlaywrightSession) OpenLogin(ctx context.Context) (LoginResult, error) {

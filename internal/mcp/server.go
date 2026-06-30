@@ -16,6 +16,7 @@ type ZhihuClient interface {
 	Question(context.Context, int64) (zhihu.Question, error)
 	Answers(context.Context, int64, int) ([]zhihu.Answer, error)
 	PublishAnswer(context.Context, zhihu.PublishAnswerRequest) (zhihu.PublishAnswerResult, error)
+	PublishArticle(context.Context, zhihu.PublishArticleRequest) (zhihu.PublishArticleResult, error)
 	OpenLogin(context.Context) (zhihu.LoginResult, error)
 	LoginStatus(context.Context) (zhihu.LoginStatus, error)
 }
@@ -174,6 +175,22 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (any, err
 			Content:    args.Content,
 			DryRun:     dryRun,
 		}))
+	case "zhihu_publish_article":
+		var args struct {
+			Title   string `json:"title"`
+			Content string `json:"content"`
+			DryRun  *bool  `json:"dry_run"`
+		}
+		_ = json.Unmarshal(call.Arguments, &args)
+		dryRun := true
+		if args.DryRun != nil {
+			dryRun = *args.DryRun
+		}
+		return textResult(s.zhihu.PublishArticle(ctx, zhihu.PublishArticleRequest{
+			Title:   args.Title,
+			Content: args.Content,
+			DryRun:  dryRun,
+		}))
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", call.Name)
 	}
@@ -259,6 +276,15 @@ func tools() []map[string]any {
 				"content":     stringSchema("Answer content to publish."),
 				"dry_run":     boolSchema("Preview only by default. Set false to publish."),
 			}, []string{"question_id", "content"}),
+		},
+		{
+			"name":        "zhihu_publish_article",
+			"description": "Publish a Zhihu column article using the persistent Playwright profile. Defaults to dry_run=true and only publishes when dry_run=false.",
+			"inputSchema": objectSchema(map[string]any{
+				"title":   stringSchema("Article title."),
+				"content": stringSchema("Plain-text article content to publish."),
+				"dry_run": boolSchema("Preview only by default. Set false to publish."),
+			}, []string{"title", "content"}),
 		},
 	}
 }

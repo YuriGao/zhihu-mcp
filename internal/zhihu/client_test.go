@@ -13,7 +13,14 @@ type fakeSession struct {
 	postPath    string
 	postBody    any
 	postCalled  bool
+	requests    []fakeRequest
 	loginStatus LoginStatus
+}
+
+type fakeRequest struct {
+	method string
+	path   string
+	body   any
 }
 
 func (f *fakeSession) FetchJSON(_ context.Context, path string, params map[string]string, target any) error {
@@ -58,7 +65,21 @@ func (f *fakeSession) PostJSON(_ context.Context, path string, body any, target 
 	f.postCalled = true
 	f.postPath = path
 	f.postBody = body
-	return json.Unmarshal([]byte(`{"id":456,"url":"https://api.zhihu.com/answers/456"}`), target)
+	return json.Unmarshal([]byte(`{"id":"456","url":"https://api.zhihu.com/answers/456"}`), target)
+}
+
+func (f *fakeSession) RequestJSON(_ context.Context, method string, path string, body any, target any) error {
+	f.requests = append(f.requests, fakeRequest{method: method, path: path, body: body})
+	switch {
+	case method == "POST" && path == "https://zhuanlan.zhihu.com/api/articles/drafts":
+		return json.Unmarshal([]byte(`{"id":"789","url":"https://zhuanlan.zhihu.com/p/789"}`), target)
+	case method == "PATCH" && path == "https://zhuanlan.zhihu.com/api/articles/789/draft":
+		return json.Unmarshal([]byte(`{"id":"789","url":"https://zhuanlan.zhihu.com/p/789"}`), target)
+	case method == "POST" && path == "https://www.zhihu.com/api/v4/content/publish":
+		return json.Unmarshal([]byte(`{"data":{"result":"{\"id\":\"789\",\"url\":\"https://zhuanlan.zhihu.com/p/789\"}"}}`), target)
+	default:
+		return json.Unmarshal([]byte(`{}`), target)
+	}
 }
 
 func (f *fakeSession) OpenLogin(context.Context) (LoginResult, error) {
@@ -132,14 +153,83 @@ func TestPublishAnswerPostsThroughBrowserSession(t *testing.T) {
 	if !session.postCalled {
 		t.Fatal("PostJSON was not called")
 	}
-	if session.postPath != "/questions/123/answers" {
+	if session.postPath != "https://www.zhihu.com/api/v4/questions/123/answers" {
 		t.Fatalf("post path = %q", session.postPath)
 	}
 	body := session.postBody.(map[string]any)
-	if body["content"] != "hello zhihu" {
+	if body["content"] != "<p>hello zhihu</p>" {
 		t.Fatalf("content = %#v", body["content"])
 	}
+	if body["reshipment_settings"] != "allowed" || body["comment_permission"] != "all" {
+		t.Fatalf("missing publish settings: %#v", body)
+	}
+	reward := body["reward_setting"].(map[string]any)
+	if reward["can_reward"] != false {
+		t.Fatalf("reward_setting = %#v", reward)
+	}
 	if result.DryRun || result.AnswerID != 456 || result.URL != "https://www.zhihu.com/question/123/answer/456" {
+		t.Fatalf("unexpected publish result: %#v", result)
+	}
+}
+
+func TestPublishArticleDryRunDoesNotCallBrowserRequest(t *testing.T) {
+	session := &fakeSession{}
+	client := NewClient(WithSession(session))
+	result, err := client.PublishArticle(t.Context(), PublishArticleRequest{
+		Title:   "  Slidr Free  ",
+		Content: "  hello article  ",
+		DryRun:  true,
+	})
+	if err != nil {
+		t.Fatalf("PublishArticle returned error: %v", err)
+	}
+	if len(session.requests) != 0 {
+		t.Fatal("RequestJSON was called during dry run")
+	}
+	if !result.DryRun || result.Title != "Slidr Free" || result.Content != "hello article" {
+		t.Fatalf("unexpected dry-run result: %#v", result)
+	}
+}
+
+func TestPublishArticleCreatesUpdatesAndPublishesDraft(t *testing.T) {
+	session := &fakeSession{}
+	client := NewClient(WithSession(session))
+	result, err := client.PublishArticle(t.Context(), PublishArticleRequest{
+		Title:   "Slidr Free",
+		Content: "First line\n\nhttps://github.com/YuriGao/slidr-free",
+	})
+	if err != nil {
+		t.Fatalf("PublishArticle returned error: %v", err)
+	}
+	if len(session.requests) != 3 {
+		t.Fatalf("request count = %d, want 3", len(session.requests))
+	}
+	want := []fakeRequest{
+		{method: "POST", path: "https://zhuanlan.zhihu.com/api/articles/drafts"},
+		{method: "PATCH", path: "https://zhuanlan.zhihu.com/api/articles/789/draft"},
+		{method: "POST", path: "https://www.zhihu.com/api/v4/content/publish"},
+	}
+	for i := range want {
+		if session.requests[i].method != want[i].method || session.requests[i].path != want[i].path {
+			t.Fatalf("request %d = %#v, want %#v", i, session.requests[i], want[i])
+		}
+	}
+	patchBody := session.requests[1].body.(map[string]any)
+	if patchBody["title"] != "Slidr Free" {
+		t.Fatalf("title = %#v", patchBody["title"])
+	}
+	if !strings.Contains(patchBody["content"].(string), "<p>First line</p>") {
+		t.Fatalf("content html = %q", patchBody["content"])
+	}
+	publishBody := session.requests[2].body.(map[string]any)
+	if publishBody["action"] != "publish" {
+		t.Fatalf("publish action = %#v", publishBody["action"])
+	}
+	data := publishBody["data"].(map[string]any)
+	if data["type"] != "article" || data["article_id"] != int64(789) {
+		t.Fatalf("publish data = %#v", data)
+	}
+	if result.DryRun || result.ArticleID != 789 || result.URL != "https://zhuanlan.zhihu.com/p/789" {
 		t.Fatalf("unexpected publish result: %#v", result)
 	}
 }
