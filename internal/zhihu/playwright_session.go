@@ -1,6 +1,7 @@
 package zhihu
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -61,7 +62,7 @@ func (s *PlaywrightSession) FetchJSON(ctx context.Context, path string, params m
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal([]byte(body), target); err != nil {
+	if err := decodeBrowserJSONResponse(body, target); err != nil {
 		return fmt.Errorf("decode zhihu response from browser: %w", err)
 	}
 	return nil
@@ -97,10 +98,14 @@ func (s *PlaywrightSession) RequestJSON(ctx context.Context, method string, path
 	if err != nil {
 		return err
 	}
+	bodyJSON, err := marshalBrowserRequestBody(body)
+	if err != nil {
+		return err
+	}
 	arg := map[string]any{
 		"method": strings.ToUpper(method),
 		"url":    apiURL,
-		"body":   body,
+		"body":   bodyJSON,
 	}
 	value, err := evaluateBrowserJSONRequest(page, arg)
 	if err != nil {
@@ -119,10 +124,27 @@ func (s *PlaywrightSession) RequestJSON(ctx context.Context, method string, path
 	if target == nil || strings.TrimSpace(text) == "" {
 		return nil
 	}
-	if err := json.Unmarshal([]byte(text), target); err != nil {
+	if err := decodeBrowserJSONResponse(text, target); err != nil {
 		return fmt.Errorf("decode zhihu response from browser: %w", err)
 	}
 	return nil
+}
+
+func marshalBrowserRequestBody(body any) (string, error) {
+	if body == nil {
+		return "{}", nil
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return "", fmt.Errorf("encode zhihu request body: %w", err)
+	}
+	return string(data), nil
+}
+
+func decodeBrowserJSONResponse(text string, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader([]byte(text)))
+	decoder.UseNumber()
+	return decoder.Decode(target)
 }
 
 func (s *PlaywrightSession) requestURL(path string) (string, error) {
@@ -149,7 +171,7 @@ func evaluateBrowserJSONRequest(page playwright.Page, arg map[string]any) (any, 
 					'content-type': 'application/json',
 					'x-xsrftoken': decodeURIComponent(xsrf)
 				},
-				body: JSON.stringify(body || {})
+				body: body || '{}'
 			});
 			const text = await response.text();
 			return { ok: response.ok, status: response.status, statusText: response.statusText, text };

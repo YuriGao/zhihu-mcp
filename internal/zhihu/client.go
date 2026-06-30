@@ -131,9 +131,10 @@ type PublishAnswerResult struct {
 }
 
 type PublishArticleRequest struct {
-	Title   string `json:"title"`
-	Content string `json:"content"`
-	DryRun  bool   `json:"dry_run"`
+	Title       string `json:"title"`
+	Content     string `json:"content"`
+	ContentHTML string `json:"content_html,omitempty"`
+	DryRun      bool   `json:"dry_run"`
 }
 
 type PublishArticleResult struct {
@@ -405,16 +406,17 @@ func (c *Client) PublishAnswer(ctx context.Context, req PublishAnswerRequest) (P
 func (c *Client) PublishArticle(ctx context.Context, req PublishArticleRequest) (PublishArticleResult, error) {
 	req.Title = strings.TrimSpace(req.Title)
 	req.Content = strings.TrimSpace(req.Content)
+	req.ContentHTML = strings.TrimSpace(req.ContentHTML)
 	if req.Title == "" {
 		return PublishArticleResult{}, errors.New("title is required")
 	}
-	if req.Content == "" {
-		return PublishArticleResult{}, errors.New("content is required")
+	if req.Content == "" && req.ContentHTML == "" {
+		return PublishArticleResult{}, errors.New("content or content_html is required")
 	}
 	result := PublishArticleResult{
 		DryRun:  req.DryRun,
 		Title:   req.Title,
-		Content: req.Content,
+		Content: displayContent(req.Content, req.ContentHTML),
 	}
 	if req.DryRun {
 		result.Message = "dry run only; pass dry_run=false after logging in with zhihu_open_login"
@@ -433,7 +435,7 @@ func (c *Client) PublishArticle(ctx context.Context, req PublishArticleRequest) 
 		return PublishArticleResult{}, errors.New("create zhihu article draft: response did not include draft id")
 	}
 
-	contentHTML := plainTextToZhihuHTML(req.Content)
+	contentHTML := contentHTML(req.Content, req.ContentHTML)
 	draftURL := fmt.Sprintf("https://zhuanlan.zhihu.com/api/articles/%d/draft", draftID)
 	if err := c.session.RequestJSON(ctx, "PATCH", draftURL, map[string]any{
 		"title":             req.Title,
@@ -502,27 +504,7 @@ func (c *Client) UpdateAnswer(ctx context.Context, req UpdateAnswerRequest) (Upd
 		return result, nil
 	}
 
-	contentHTML := contentHTML(req.Content, req.ContentHTML)
-	publishBody := map[string]any{
-		"action": "update",
-		"data": map[string]any{
-			"type":                "answer",
-			"question_id":         req.QuestionID,
-			"answer_id":           req.AnswerID,
-			"content":             contentHTML,
-			"reshipment_settings": "allowed",
-			"comment_permission":  "all",
-			"reward_setting":      map[string]any{"can_reward": false},
-			"is_copyable":         true,
-			"is_report":           false,
-		},
-	}
-	var payload contentPublishResponse
-	if err := c.session.RequestJSON(ctx, "POST", "https://www.zhihu.com/api/v4/content/publish", publishBody, &payload); err != nil {
-		return UpdateAnswerResult{}, fmt.Errorf("update zhihu answer: %w", err)
-	}
-	result.Message = "answer updated"
-	return result, nil
+	return UpdateAnswerResult{}, errors.New("updating published Zhihu answers is not supported safely yet; edit in the Zhihu UI or publish a replacement after verification")
 }
 
 func (c *Client) UpdateArticle(ctx context.Context, req UpdateArticleRequest) (UpdateArticleResult, error) {
@@ -550,45 +532,7 @@ func (c *Client) UpdateArticle(ctx context.Context, req UpdateArticleRequest) (U
 		return result, nil
 	}
 
-	contentHTML := contentHTML(req.Content, req.ContentHTML)
-	publishBody := map[string]any{
-		"action": "update",
-		"data": map[string]any{
-			"type":                         "article",
-			"article_id":                   req.ArticleID,
-			"title":                        req.Title,
-			"content":                      contentHTML,
-			"column":                       nil,
-			"comment_permission":           "all",
-			"commercial_report_info":       map[string]any{"commercial_types": []any{}},
-			"commercial_zhitask_bind_info": nil,
-			"content_source":               map[string]any{"method": 0},
-		},
-	}
-	var payload contentPublishResponse
-	if err := c.session.RequestJSON(ctx, "POST", "https://www.zhihu.com/api/v4/content/publish", publishBody, &payload); err != nil {
-		return UpdateArticleResult{}, fmt.Errorf("update zhihu article: %w", err)
-	}
-	if strings.TrimSpace(payload.Data.Result) != "" {
-		var published struct {
-			ID  any    `json:"id"`
-			URL string `json:"url"`
-		}
-		if err := json.Unmarshal([]byte(payload.Data.Result), &published); err == nil {
-			if id := int64FromAny(published.ID); id > 0 {
-				result.ArticleID = id
-			}
-			result.URL = articleURL(result.ArticleID, published.URL)
-		}
-	}
-	result.Message = "article updated"
-	return result, nil
-}
-
-type contentPublishResponse struct {
-	Data struct {
-		Result string `json:"result"`
-	} `json:"data"`
+	return UpdateArticleResult{}, errors.New("updating published Zhihu articles is not supported safely yet; edit in the Zhihu UI or publish a replacement article")
 }
 
 var questionURLPattern = regexp.MustCompile(`/questions?/(\d+)`)
@@ -698,6 +642,9 @@ func int64FromAny(value any) int64 {
 		return v
 	case int:
 		return int64(v)
+	case json.Number:
+		id, _ := v.Int64()
+		return id
 	case string:
 		id, _ := strconv.ParseInt(v, 10, 64)
 		return id

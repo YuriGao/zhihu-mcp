@@ -241,73 +241,62 @@ func TestPublishArticleCreatesUpdatesAndPublishesDraft(t *testing.T) {
 	}
 }
 
-func TestUpdateAnswerUsesContentPublishUpdateWithHTML(t *testing.T) {
+func TestPublishArticleUsesProvidedHTMLContent(t *testing.T) {
 	session := &fakeSession{}
 	client := NewClient(WithSession(session))
-	result, err := client.UpdateAnswer(t.Context(), UpdateAnswerRequest{
+	_, err := client.PublishArticle(t.Context(), PublishArticleRequest{
+		Title:       "Slidr Free",
+		Content:     "fallback plain",
+		ContentHTML: `<h2>项目亮点</h2><ul><li>边缘滑动</li></ul>`,
+	})
+	if err != nil {
+		t.Fatalf("PublishArticle returned error: %v", err)
+	}
+	if len(session.requests) != 3 {
+		t.Fatalf("request count = %d, want 3", len(session.requests))
+	}
+	patchBody := session.requests[1].body.(map[string]any)
+	if patchBody["content"] != `<h2>项目亮点</h2><ul><li>边缘滑动</li></ul>` {
+		t.Fatalf("draft content = %#v", patchBody["content"])
+	}
+	publishBody := session.requests[2].body.(map[string]any)
+	data := publishBody["data"].(map[string]any)
+	if data["content"] != `<h2>项目亮点</h2><ul><li>边缘滑动</li></ul>` {
+		t.Fatalf("publish content = %#v", data["content"])
+	}
+}
+
+func TestUpdateAnswerRejectsUnsafeNonDryRunWithoutNetworkRequest(t *testing.T) {
+	session := &fakeSession{}
+	client := NewClient(WithSession(session))
+	_, err := client.UpdateAnswer(t.Context(), UpdateAnswerRequest{
 		QuestionID:  123,
 		AnswerID:    456,
 		Content:     "fallback plain",
 		ContentHTML: `<h2>项目亮点</h2><ul><li>边缘滑动</li></ul>`,
 	})
-	if err != nil {
-		t.Fatalf("UpdateAnswer returned error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("UpdateAnswer error = %v, want unsupported error", err)
 	}
-	if len(session.requests) != 1 {
-		t.Fatalf("request count = %d, want 1", len(session.requests))
-	}
-	req := session.requests[0]
-	if req.method != "POST" || req.path != "https://www.zhihu.com/api/v4/content/publish" {
-		t.Fatalf("request = %#v", req)
-	}
-	body := req.body.(map[string]any)
-	if body["action"] != "update" {
-		t.Fatalf("action = %#v", body["action"])
-	}
-	data := body["data"].(map[string]any)
-	if data["type"] != "answer" || data["question_id"] != int64(123) || data["answer_id"] != int64(456) {
-		t.Fatalf("data = %#v", data)
-	}
-	if data["content"] != `<h2>项目亮点</h2><ul><li>边缘滑动</li></ul>` {
-		t.Fatalf("content = %#v", data["content"])
-	}
-	if result.DryRun || result.AnswerID != 456 || result.URL != "https://www.zhihu.com/question/123/answer/456" {
-		t.Fatalf("unexpected result: %#v", result)
+	if len(session.requests) != 0 || session.postCalled {
+		t.Fatalf("unsafe update made network calls: postCalled=%v requests=%#v", session.postCalled, session.requests)
 	}
 }
 
-func TestUpdateArticleUsesContentPublishUpdateWithHTML(t *testing.T) {
+func TestUpdateArticleRejectsUnsafeNonDryRunWithoutNetworkRequest(t *testing.T) {
 	session := &fakeSession{}
 	client := NewClient(WithSession(session))
-	result, err := client.UpdateArticle(t.Context(), UpdateArticleRequest{
+	_, err := client.UpdateArticle(t.Context(), UpdateArticleRequest{
 		ArticleID:   456,
 		Title:       "Slidr Free",
 		Content:     "fallback plain",
 		ContentHTML: `<h2>安装</h2><pre><code>swift build</code></pre>`,
 	})
-	if err != nil {
-		t.Fatalf("UpdateArticle returned error: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "not supported") {
+		t.Fatalf("UpdateArticle error = %v, want unsupported error", err)
 	}
-	if len(session.requests) != 1 {
-		t.Fatalf("request count = %d, want 1", len(session.requests))
-	}
-	req := session.requests[0]
-	if req.method != "POST" || req.path != "https://www.zhihu.com/api/v4/content/publish" {
-		t.Fatalf("request = %#v", req)
-	}
-	body := req.body.(map[string]any)
-	if body["action"] != "update" {
-		t.Fatalf("action = %#v", body["action"])
-	}
-	data := body["data"].(map[string]any)
-	if data["type"] != "article" || data["article_id"] != int64(456) || data["title"] != "Slidr Free" {
-		t.Fatalf("data = %#v", data)
-	}
-	if data["content"] != `<h2>安装</h2><pre><code>swift build</code></pre>` {
-		t.Fatalf("content = %#v", data["content"])
-	}
-	if result.DryRun || result.ArticleID != 456 || result.URL != "https://zhuanlan.zhihu.com/p/456" {
-		t.Fatalf("unexpected result: %#v", result)
+	if len(session.requests) != 0 || session.postCalled {
+		t.Fatalf("unsafe update made network calls: postCalled=%v requests=%#v", session.postCalled, session.requests)
 	}
 }
 
@@ -324,5 +313,12 @@ func TestLoginStatusUsesPersistentProfile(t *testing.T) {
 	}
 	if !status.LoggedIn || !strings.Contains(status.ProfileDir, ".zhihu-profile") {
 		t.Fatalf("unexpected status: %#v", status)
+	}
+}
+
+func TestInt64FromAnyPreservesJSONNumberIDs(t *testing.T) {
+	id := int64FromAny(json.Number("2055401990973400552"))
+	if id != 2055401990973400552 {
+		t.Fatalf("id = %d, want exact Zhihu id", id)
 	}
 }

@@ -12,8 +12,6 @@ A Go MCP server for Zhihu using Playwright persistent browser state over stdio.
 - `zhihu_answers`: fetch answers for a question.
 - `zhihu_publish_answer`: publish an answer with the persistent Playwright profile.
 - `zhihu_publish_article`: publish a column article with the persistent Playwright profile.
-- `zhihu_update_answer`: update an existing answer, with optional rich HTML content.
-- `zhihu_update_article`: update an existing column article, with optional rich HTML content.
 
 The server stores login state in a dedicated Playwright profile directory. It does not read your normal Chrome profile and does not bypass captcha, rate limits, or other Zhihu safety checks.
 
@@ -78,27 +76,18 @@ Publishing requires that the Playwright profile is logged in. The server uses no
 {
   "title": "Your article title",
   "content": "Plain-text article content",
+  "content_html": "<h2>Optional rich section</h2><p>Zhihu-compatible HTML.</p>",
   "dry_run": false
 }
 ```
 
-The server converts plain text paragraphs into Zhihu-compatible HTML and publishes through the same persistent Playwright profile.
+The server converts plain text paragraphs into Zhihu-compatible HTML unless `content_html` is provided. Because Zhihu article publishing may leave content as a draft, verify the returned URL in the browser after publishing.
 
 ## Updating Published Content
 
-Both update tools default to `dry_run: true`. Pass `content_html` when you need richer formatting than plain paragraphs:
+Published-content update tools are intentionally not exposed yet. Zhihu's editor/publish flow can create drafts that look successful at the API layer without changing the visible published content, and the article update path can make an existing article unavailable.
 
-```json
-{
-  "question_id": 123,
-  "answer_id": 456,
-  "content": "Plain-text fallback or preview",
-  "content_html": "<h2>Section</h2><ul><li>Rich item</li></ul>",
-  "dry_run": false
-}
-```
-
-For articles, use `article_id`, `title`, `content`, optional `content_html`, and `dry_run`.
+Until the update flow is verified end to end, edit published answers and articles in the Zhihu UI, or publish a replacement article with `zhihu_publish_article`.
 
 ## MCP Configuration
 
